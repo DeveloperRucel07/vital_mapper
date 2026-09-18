@@ -1,0 +1,76 @@
+services:
+  backend:
+    build: .
+    depends_on: [ollama, whisper, db, redis]
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8081/realms/health-interop}
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-http://host.docker.internal:8081/realms/health-interop/protocol/openid-connect/certs}
+      KEYCLOAK_API_AUDIENCE: ${KEYCLOAK_API_AUDIENCE:-monitoring-pflege-api}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-vital-mapper-frontend}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?Set KEYCLOAK_CLIENT_SECRET in .env}
+      OIDC_AUTHORIZATION_URL: ${OIDC_AUTHORIZATION_URL:-http://localhost:8081/realms/health-interop/protocol/openid-connect/auth}
+      OIDC_TOKEN_URL: ${OIDC_TOKEN_URL:-http://host.docker.internal:8081/realms/health-interop/protocol/openid-connect/token}
+      OIDC_LOGOUT_URL: ${OIDC_LOGOUT_URL:-http://localhost:8081/realms/health-interop/protocol/openid-connect/logout}
+      APP_ORIGIN: ${VITAL_MAPPER_APP_ORIGIN:-http://localhost:4000}
+      BFF_REDIS_URL: ${BFF_REDIS_URL:-redis://redis:6379/1}
+      BFF_SESSION_ENCRYPTION_KEY: ${BFF_SESSION_ENCRYPTION_KEY:?Set BFF_SESSION_ENCRYPTION_KEY in .env}
+      BFF_COOKIE_SECURE: ${BFF_COOKIE_SECURE:-false}
+      INTEROP_GATEWAY_URL: ${INTEROP_GATEWAY_URL:-http://host.docker.internal:8600}
+      LEGACY_AUTH_ENABLED: ${LEGACY_AUTH_ENABLED:-false}
+      AUDIO_STORAGE_PATH: ${AUDIO_STORAGE_PATH:-/var/lib/vital-mapper/audio}
+      MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-25000000}
+    ports: ["8000:8000"]
+    volumes:
+      - audio_data:/var/lib/vital-mapper/audio
+
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    ports: ["4000:8080"]
+
+  ollama:
+    image: ollama/ollama
+    volumes: [ollama_models:/root/.ollama]
+    # Modell nach dem Start ziehen: docker exec <container> ollama pull llama3.1:8b-instruct
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, capabilities: [gpu] }]
+
+  whisper:
+    build: ./whisper-service
+    environment:
+      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      HF_HUB_DISABLE_XET: ${HF_HUB_DISABLE_XET:-1}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - whisper_models:/root/.cache/huggingface
+    ports: ["8001:8001"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, capabilities: [gpu] }]
+
+  redis:
+    image: redis:7-alpine
+    volumes: [redis_data:/data]
+
+  db:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=vitalmapper
+      - POSTGRES_PASSWORD=changeme
+      - POSTGRES_DB=vitalmapper
+    volumes: [pgdata:/var/lib/postgresql/data]
+
+volumes:
+  ollama_models:
+  redis_data:
+  pgdata:
+  audio_data:
+  whisper_models:
