@@ -1,88 +1,84 @@
-# Vital Mapper – Backend
+# Vital Mapper
 
-Sprachgestuetzter Pflegedokumentationsassistent. Dieses Repository enthaelt
-ausschliesslich das **Backend**; das Frontend folgt in einem separaten
-Schritt.
+Vital Mapper is a privacy-focused, speech-assisted nursing documentation platform for clinical care environments. It transforms spoken nursing observations into structured, reviewable documentation while keeping healthcare professionals in control of every clinical decision.
 
-- Fachliche Anforderungen, Architekturentscheidungen und Datenmodell:
-  [`docs/anforderungen.md`](docs/anforderungen.md)
-- Regeln fuer jedes KI-Coding-Tool, das hier arbeitet:
-  [`AGENTS.md`](AGENTS.md)
-- Verbindliche Abnahmekriterien: [`DEFINITION_OF_DONE.md`](DEFINITION_OF_DONE.md)
+The application supports the complete documentation workflow: recording audio, generating transcripts, extracting clinical information, reviewing and correcting AI-generated suggestions, approving documentation, and forwarding approved data to an external nursing monitoring system. Extracted information can include blood pressure, pulse, temperature, oxygen saturation, pain scores, fluid intake, mobility, orientation, falls, interventions, and patient reactions.
 
-## Architektur
+Safety and traceability are core principles. AI-generated values must remain grounded in the transcript and may not be invented or completed with defaults. Missing or uncertain information remains visible for manual review. Clinical data is transmitted only after explicit human approval. The system also supports audit logging, role-based access control, patient-level authorization, encrypted audio storage, and privacy-preserving patient references.
 
-Clean Architecture mit vier Schichten (`domain`, `application`,
-`infrastructure`, `interfaces`) und Event-Driven-Kopplung zwischen den
-Modulen ueber ein Postgres-Outbox-Pattern plus Redis. Details: Kapitel 10/11
-in `docs/anforderungen.md`.
+Vital Mapper uses local or on-premises speech recognition and language-model services. Approved nursing reports and vital measurements are sent through a versioned interoperability gateway. The monitoring system performs the authoritative FHIR, LOINC, and UCUM mapping, so internal field names do not need to match the external clinical data model.
 
-Tech-Stack: FastAPI, Ollama (Llama 3.x, lokal via Docker), ein eigenstaendiger
-Whisper-Service (faster-whisper, eigener Container), PostgreSQL, Redis, HAPI
-FHIR.
+## Features
 
-## Schnellstart
+- Speech recording and transcript persistence
+- Local transcription with faster-whisper
+- Local clinical extraction with Ollama
+- Grounding checks that prevent unsupported clinical values
+- Manual review, correction, and approval workflow
+- Vital-sign mapping for blood pressure, pulse, temperature, SpO2, and pain
+- Keycloak/OIDC authentication with server-side session handling
+- Role-based and patient-level access control
+- Encrypted audio storage and audit logging
+- PostgreSQL persistence and Redis-backed sessions
+- Docker Compose development environment
+
+## Architecture
+
+The backend follows Clean Architecture:
+
+```text
+src/vital_mapper/
+|-- domain/          # Clinical entities and business rules
+|-- application/     # Use cases and abstract ports
+|-- infrastructure/  # Database, AI, security, and integration adapters
+`-- interfaces/api/  # FastAPI routes and dependency wiring
+```
+
+External services are accessed through infrastructure adapters. Clinical data is never sent directly from the domain or application layers to an external system.
+
+## Quick start with Docker
+
+Create the local environment file and set the required secrets:
 
 ```bash
-cp .env.example .env      # Werte anpassen, insbesondere Secrets/Keys
+cp .env.example .env
 docker compose up --build
 ```
 
-Danach einmalig das Ollama-Modell ziehen:
+Pull the Ollama model once after the containers are running:
 
 ```bash
-docker exec -it <ollama-container-name> ollama pull llama3.1:8b-instruct
+docker compose exec ollama ollama pull llama3.1:8b-instruct
 ```
 
-API-Dokumentation danach unter `http://localhost:8000/docs`.
+The application is then available at:
 
-## Authentifizierung
+- Frontend: `http://localhost:4000`
+- Backend API: `http://localhost:8000`
+- Swagger UI: `http://localhost:8000/docs`
 
-Die API verwendet Username/Passwort zur Anmeldung und kurzlebige JWT-Bearer-
-Tokens fuer geschuetzte Endpunkte. Passwoerter werden ausschliesslich als
-scrypt-Hash gespeichert.
+The interoperability gateway must be running separately at the address configured by `INTEROP_GATEWAY_URL`.
 
-Anmeldung:
+## Local development
 
-```http
-POST /auth/login
-Content-Type: application/json
-
-{"username": "pflegekraft-test", "password": "<passwort>"}
-```
-
-Die Antwort enthaelt `access_token` und `token_type: "bearer"`. Benutzerkonten
-werden ausschliesslich durch einen bereits authentifizierten Administrator
-ueber `POST /auth/users` angelegt. Ein offener Bootstrap-Endpunkt fuer den
-ersten Administrator ist absichtlich nicht vorhanden; die Erstinitialisierung
-muss ueber eine kontrollierte Datenbank-/Deployment-Provisionierung erfolgen.
-Fuer eine lokale Erstinitialisierung koennen temporaer `BOOTSTRAP_ADMIN_USERNAME`
-und `BOOTSTRAP_ADMIN_PASSWORD` in `.env` gesetzt und danach wieder entfernt
-werden:
-
-```bash
-python -m vital_mapper.interfaces.cli.create_admin
-```
-
-Wenn `DATABASE_URL` wie in der Docker-Konfiguration auf den Host `db` zeigt,
-muss dieser Befehl innerhalb des Compose-Netzwerks ausgefuehrt werden:
-
-```bash
-docker compose exec backend python -m vital_mapper.interfaces.cli.create_admin
-```
-
-Ist der Backend-Container noch nicht gestartet, zuerst `docker compose up -d`
-ausfuehren oder einmalig `docker compose run --rm backend python -m
-vital_mapper.interfaces.cli.create_admin` verwenden.
-
-## Entwicklung ohne Docker
+Install the backend and development dependencies:
 
 ```bash
 pip install -e ".[dev]" --break-system-packages
 uvicorn vital_mapper.interfaces.api.main:app --reload
 ```
 
-## Qualitaetssicherung
+For frontend development:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+## Quality checks
+
+Run the complete backend quality gate before submitting changes:
 
 ```bash
 pytest
@@ -93,28 +89,4 @@ bandit -r src -ll
 pip-audit
 ```
 
-Alle fuenf Befehle muessen fehlerfrei laufen, bevor eine Aenderung als
-abgeschlossen gilt (siehe `DEFINITION_OF_DONE.md`, Ebene 1).
-
-## Frontend
-
-Das React/TypeScript-Frontend liegt unter `frontend/`. Der Produktionsbetrieb
-erfolgt über einen eigenen, nicht-rootfähigen Nginx-Container. Nach
-`docker compose up --build` ist es unter `http://localhost:3000` erreichbar;
-`/backend/` wird intern an FastAPI weitergeleitet.
-
-Für reine Frontend-Entwicklung:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-## Sicherheitshinweis
-
-Dieses Projekt verarbeitet Gesundheitsdaten. Vor jedem produktiven Einsatz
-mit echten Patientendaten: DSFA und MDR-Klassifizierung muessen abgeschlossen
-sein (siehe `docs/anforderungen.md` Kapitel 12/13 und `DEFINITION_OF_DONE.md`,
-Ebene 3). Waehrend der Entwicklung ausschliesslich synthetische Testdaten
-verwenden.
+Never commit `.env` files, access tokens, passwords, certificates, patient data, or generated model/cache files.
