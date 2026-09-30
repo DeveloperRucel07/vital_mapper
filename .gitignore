@@ -13,5 +13,6 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 AGENTS.md
-docs
+docs/*
+!docs/security.md
 DEFINITION_OF_DONE.md

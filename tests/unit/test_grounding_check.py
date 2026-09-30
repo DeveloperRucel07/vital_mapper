@@ -5,12 +5,16 @@ from vital_mapper.domain.grounded_facts import apply_explicit_grounded_facts
 from vital_mapper.domain.value_objects import (
     ClinicalExtraction,
     Fluessigkeit,
+    Mobilitaet,
+    Orientierung,
+    Reaktion,
     Schmerz,
+    Sturz,
     Vitalparameter,
 )
 from vital_mapper.infrastructure.ollama.ollama_adapter import (
     OllamaExtractionAdapter,
-    _sanitize_ungrounded_numeric_values,
+    _sanitize_ungrounded_values,
 )
 
 
@@ -77,7 +81,7 @@ def test_decimal_temperature_grounding_accepts_german_spacing() -> None:
     OllamaExtractionAdapter._assert_grounded(extraction, "Temperatur 37 , 0 Grad.")
 
 
-def test_ungrounded_numeric_value_is_marked_uncertain_instead_of_aborting() -> None:
+def test_ungrounded_facts_are_marked_uncertain_instead_of_aborting() -> None:
     extraction = ClinicalExtraction(
         vitalparameter=Vitalparameter(
             blutdruck_systolisch=None,
@@ -85,12 +89,74 @@ def test_ungrounded_numeric_value_is_marked_uncertain_instead_of_aborting() -> N
             puls=85,
             temperatur=None,
             spo2=None,
-        )
+        ),
+        schmerz=Schmerz(vorhanden=True, lokalisation="Knie"),
+        mobilitaet=Mobilitaet(status="selbststaendig"),
+        orientierung=Orientierung(status="desorientiert"),
+        sturz=Sturz(ereignis=True),
+        reaktion=Reaktion(typ="verbesserung"),
     )
 
-    sanitized = _sanitize_ungrounded_numeric_values(extraction, "Der Zustand ist stabil.")
+    sanitized = _sanitize_ungrounded_values(extraction, "Der Zustand ist stabil.")
 
     assert sanitized.vitalparameter is not None
     assert sanitized.vitalparameter.puls is None
+    assert sanitized.schmerz is not None
+    assert sanitized.schmerz.vorhanden is None
+    assert sanitized.schmerz.lokalisation is None
+    assert sanitized.mobilitaet is not None
+    assert sanitized.mobilitaet.status is None
+    assert sanitized.orientierung is not None
+    assert sanitized.orientierung.status is None
+    assert sanitized.sturz is not None
+    assert sanitized.sturz.ereignis is None
+    assert sanitized.reaktion is not None
+    assert sanitized.reaktion.typ is None
     assert "vitalparameter.puls" in sanitized.unsichere_felder
+    assert "schmerz.vorhanden" in sanitized.unsichere_felder
+    assert "schmerz.lokalisation" in sanitized.unsichere_felder
+    assert "mobilitaet.status" in sanitized.unsichere_felder
+    assert "orientierung.status" in sanitized.unsichere_felder
+    assert "sturz.ereignis" in sanitized.unsichere_felder
+    assert "reaktion.typ" in sanitized.unsichere_felder
     OllamaExtractionAdapter._assert_grounded(sanitized, "Der Zustand ist stabil.")
+
+
+def test_grounding_accepts_explicit_text_boolean_and_enum_facts() -> None:
+    transcript = (
+        "Patientin hat Schmerzen am rechten Knie, NRS vier. "
+        "Sie ist mit dem Rollator mobil, das Gangbild ist unsicher und sie ist orientiert. "
+        "Nach dem Sturz ist eine Verschlechterung beschrieben."
+    )
+    extraction = ClinicalExtraction(
+        schmerz=Schmerz(vorhanden=True, lokalisation="rechtes Knie", intensitaet_nrs=4),
+        mobilitaet=Mobilitaet(status="rollator", gangbild="unsicher"),
+        orientierung=Orientierung(status="orientiert"),
+        sturz=Sturz(ereignis=True),
+        reaktion=Reaktion(typ="verschlechterung", beschreibung="Verschlechterung"),
+    )
+
+    OllamaExtractionAdapter._assert_grounded(extraction, transcript)
+
+
+@pytest.mark.parametrize(
+    ("extraction", "transcript"),
+    [
+        (
+            ClinicalExtraction(vitalparameter=Vitalparameter(spo2=99)),
+            "Sauerstoffsättigung 97 Prozent.",
+        ),
+        (ClinicalExtraction(schmerz=Schmerz(lokalisation="Schulter")), "Schmerzen am Knie."),
+        (ClinicalExtraction(schmerz=Schmerz(vorhanden=True)), "Keine Schmerzen."),
+        (
+            ClinicalExtraction(mobilitaet=Mobilitaet(status="rollator")),
+            "Patientin ist selbstständig mobil.",
+        ),
+        (ClinicalExtraction(sturz=Sturz(ereignis=False)), "Patient ist gestürzt."),
+    ],
+)
+def test_grounding_rejects_ungrounded_non_numeric_facts(
+    extraction: ClinicalExtraction, transcript: str
+) -> None:
+    with pytest.raises(UngroundedExtractionError):
+        OllamaExtractionAdapter._assert_grounded(extraction, transcript)

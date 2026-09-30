@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, date, datetime, time, timedelta
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vital_mapper.application.ports.repository_port import RepositoryPort
@@ -37,6 +37,11 @@ from vital_mapper.infrastructure.persistence.models import (
     RecordingModel,
     TranscriptModel,
 )
+from vital_mapper.infrastructure.security.encryption import (
+    TRANSCRIPT_CIPHERTEXT_PREFIX,
+    decrypt_transcript_text,
+    encrypt_transcript_text,
+)
 
 
 class PostgresRepository(RepositoryPort):
@@ -56,18 +61,35 @@ class PostgresRepository(RepositoryPort):
         )
         await self._session.commit()
 
+    async def list_recordings_with_expired_audio(
+        self, cutoff: datetime, limit: int
+    ) -> list[Recording]:
+        """Liest nur Aufnahmen mit noch vorhandener, abgelaufener Audioreferenz (F-27)."""
+
+        effective_end = func.coalesce(RecordingModel.ended_at, RecordingModel.started_at)
+        statement = (
+            select(RecordingModel)
+            .where(RecordingModel.audio_ref != "", effective_end < cutoff)
+            .order_by(effective_end.asc())
+            .limit(limit)
+        )
+        models = (await self._session.scalars(statement)).all()
+        return [self._recording_from_model(model) for model in models]
+
+    async def mark_audio_deleted(self, recording_id: uuid.UUID) -> None:
+        """Entfernt die Referenz nach erfolgreicher physischer Loeschung (F-27)."""
+
+        model = await self._session.get(RecordingModel, recording_id)
+        if model is None:
+            raise RecordingNotFoundError(f"Recording {recording_id} nicht gefunden.")
+        model.audio_ref = ""
+        await self._session.commit()
+
     async def get_recording(self, recording_id: uuid.UUID) -> Recording:
         model = await self._session.get(RecordingModel, recording_id)
         if model is None:
             raise RecordingNotFoundError(f"Recording {recording_id} nicht gefunden.")
-        return Recording(
-            id=model.id,
-            patient_ref=model.patient_ref,
-            author_id=model.author_id,
-            audio_ref=model.audio_ref,
-            started_at=model.started_at,
-            ended_at=model.ended_at,
-        )
+        return self._recording_from_model(model)
 
     async def get_patient_ref_for_draft(self, draft_id: uuid.UUID) -> str:
         """Ermittelt den Patientenverweis ohne Stammdaten zu duplizieren (F-31)."""
@@ -128,7 +150,7 @@ class PostgresRepository(RepositoryPort):
             TranscriptModel(
                 id=transcript.id,
                 recording_id=transcript.recording_id,
-                text=transcript.text,
+                text=encrypt_transcript_text(transcript.text),
                 confidence=transcript.confidence,
                 whisper_version=transcript.whisper_version,
                 created_at=transcript.created_at,
@@ -143,7 +165,7 @@ class PostgresRepository(RepositoryPort):
         return Transcript(
             id=model.id,
             recording_id=model.recording_id,
-            text=model.text,
+            text=decrypt_transcript_text(model.text),
             confidence=model.confidence,
             whisper_version=model.whisper_version,
             created_at=model.created_at,
@@ -153,12 +175,12 @@ class PostgresRepository(RepositoryPort):
         model = await self._session.get(TranscriptModel, transcript_id)
         if model is None:
             raise TranscriptNotFoundError(f"Transcript {transcript_id} nicht gefunden.")
-        model.text = text
+        model.text = encrypt_transcript_text(text)
         await self._session.commit()
         return Transcript(
             id=model.id,
             recording_id=model.recording_id,
-            text=model.text,
+            text=decrypt_transcript_text(model.text),
             confidence=model.confidence,
             whisper_version=model.whisper_version,
             created_at=model.created_at,
@@ -290,15 +312,50 @@ class PostgresRepository(RepositoryPort):
         return self._draft_from_model(model)
 
     @staticmethod
+    def _recording_from_model(model: RecordingModel) -> Recording:
+        return Recording(
+            id=model.id,
+            patient_ref=model.patient_ref,
+            author_id=model.author_id,
+            audio_ref=model.audio_ref,
+            started_at=model.started_at,
+            ended_at=model.ended_at,
+        )
+
+    @staticmethod
     def _transcript_from_model(model: TranscriptModel) -> Transcript:
         return Transcript(
             id=model.id,
             recording_id=model.recording_id,
-            text=model.text,
+            text=decrypt_transcript_text(model.text),
             confidence=model.confidence,
             whisper_version=model.whisper_version,
             created_at=model.created_at,
         )
+
+    async def encrypt_legacy_transcripts(self, batch_size: int = 500) -> int:
+        """Migriert vorhandene Klartexttranskripte idempotent auf Fernet (F-26)."""
+
+        if batch_size < 1:
+            raise ValueError("Die Batch-Groesse muss positiv sein.")
+        migrated = 0
+        while True:
+            statement = (
+                select(TranscriptModel)
+                .where(~TranscriptModel.text.startswith(TRANSCRIPT_CIPHERTEXT_PREFIX))
+                .order_by(TranscriptModel.created_at.asc())
+                .limit(batch_size)
+            )
+            models = list((await self._session.scalars(statement)).all())
+            if not models:
+                break
+            for model in models:
+                model.text = encrypt_transcript_text(model.text)
+            await self._session.commit()
+            migrated += len(models)
+            if len(models) < batch_size:
+                break
+        return migrated
 
     @staticmethod
     def _extraction_from_model(

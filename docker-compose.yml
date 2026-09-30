@@ -22,6 +22,8 @@ services:
       LEGACY_AUTH_ENABLED: ${LEGACY_AUTH_ENABLED:-false}
       AUDIO_STORAGE_PATH: ${AUDIO_STORAGE_PATH:-/var/lib/vital-mapper/audio}
       MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-25000000}
+      AUDIO_RETENTION_DAYS: ${AUDIO_RETENTION_DAYS:-30}
+      AUDIO_RETENTION_CHECK_SECONDS: ${AUDIO_RETENTION_CHECK_SECONDS:-3600}
     ports: ["8000:8000"]
     volumes:
       - audio_data:/var/lib/vital-mapper/audio
@@ -46,11 +48,12 @@ services:
       WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
       WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
       WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-25000000}
       HF_HUB_DISABLE_XET: ${HF_HUB_DISABLE_XET:-1}
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
-      - whisper_models:/root/.cache/huggingface
-    ports: ["8001:8001"]
+      - whisper_models:/home/whisperuser/.cache/huggingface
+    expose: ["8001"]
     deploy:
       resources:
         reservations:

@@ -11,6 +11,11 @@ import {
   recorderReducer,
   type RecorderStatus,
 } from "../features/voice/recorderMachine";
+import { ClinicalInformationForm } from "../features/documentation/ClinicalInformationForm";
+import {
+  normalizeClinicalExtraction,
+  type ClinicalExtractionData,
+} from "../features/documentation/clinicalExtraction";
 
 type Page = "dashboard" | "patients" | "documentation" | "help";
 type AuthView = "checking" | "signed-out" | "signed-in";
@@ -221,7 +226,7 @@ type DraftResponse = {
 type ExtractionResponse = {
   id: string;
   transcript_id: string;
-  data: Record<string, unknown>;
+  data: ClinicalExtractionData;
   ollama_version: string;
   draft: DraftResponse | null;
 };
@@ -229,7 +234,7 @@ type ExtractionResponse = {
 type ExtractionUpdateResponse = {
   id: string;
   transcript_id: string;
-  data: Record<string, unknown>;
+  data: ClinicalExtractionData;
   ollama_version: string;
 };
 
@@ -267,7 +272,7 @@ function Documentation({
   const [recordingStartedAt, setRecordingStartedAt] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptResponse | null>(null);
   const [extraction, setExtraction] = useState<ExtractionResponse | null>(null);
-  const [extractionJson, setExtractionJson] = useState("");
+  const [clinicalData, setClinicalData] = useState<ClinicalExtractionData | null>(null);
   const [draft, setDraft] = useState<DraftResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [workflowError, setWorkflowError] = useState<string | null>(null);
@@ -316,7 +321,7 @@ function Documentation({
     setRecordingStartedAt(null);
     setTranscript(null);
     setExtraction(null);
-    setExtractionJson("");
+    setClinicalData(null);
     setDraft(null);
     setApproved(false);
     setSubmissionStatus(null);
@@ -334,7 +339,7 @@ function Documentation({
         ? { ...item.extraction, draft: item.draft }
         : null,
     );
-    setExtractionJson(item.extraction ? JSON.stringify(item.extraction.data, null, 2) : "");
+    setClinicalData(item.extraction ? normalizeClinicalExtraction(item.extraction.data) : null);
     setDraft(item.draft);
     setApproved(false);
     setSubmissionStatus(null);
@@ -362,7 +367,7 @@ function Documentation({
       recorderInstance.start();
       setRecordingStartedAt(new Date().toISOString());
       setWorkflowError(null);
-      setTranscript(null); setExtraction(null); setExtractionJson(""); setDraft(null); setApproved(false); setStep(1);
+      setTranscript(null); setExtraction(null); setClinicalData(null); setDraft(null); setApproved(false); setStep(1);
       dispatch({ type: "start" });
     } catch {
       dispatch({ type: "error", message: "Mikrofonzugriff wurde nicht erteilt. Bitte prüfen Sie die Browser-Berechtigung." });
@@ -379,7 +384,7 @@ function Documentation({
     setAudioBlob(null);
     setRecordingStartedAt(null);
     setWorkflowError(null);
-    setTranscript(null); setExtraction(null); setExtractionJson(""); setDraft(null); setApproved(false); setStep(1);
+    setTranscript(null); setExtraction(null); setClinicalData(null); setDraft(null); setApproved(false); setStep(1);
     chunks.current = [];
     dispatch({ type: "discard" });
   }
@@ -408,7 +413,7 @@ function Documentation({
     try {
       const nextExtraction = await apiClient.post<ExtractionResponse>(`/transcripts/${transcript.id}/extract`, { text: transcript.text });
       setExtraction(nextExtraction);
-      setExtractionJson(JSON.stringify(nextExtraction.data, null, 2));
+      setClinicalData(normalizeClinicalExtraction(nextExtraction.data));
       setDraft(nextExtraction.draft);
       await loadSavedTranscripts();
       setStep(3);
@@ -418,27 +423,16 @@ function Documentation({
   }
 
   async function saveExtractionAndContinue() {
-    if (!extraction) return;
-    let data: unknown;
-    try {
-      data = JSON.parse(extractionJson);
-    } catch {
-      setWorkflowError("Das JSON ist ungültig. Bitte prüfen Sie Syntax und Anführungszeichen.");
-      return;
-    }
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-      setWorkflowError("Die klinische Extraktion muss ein JSON-Objekt sein.");
-      return;
-    }
+    if (!extraction || !clinicalData) return;
     setBusy(true); setWorkflowError(null);
     try {
-      const updated = await apiClient.patch<ExtractionUpdateResponse>(`/extractions/${extraction.id}`, { data });
+      const updated = await apiClient.patch<ExtractionUpdateResponse>(`/extractions/${extraction.id}`, { data: clinicalData });
       setExtraction({ ...extraction, data: updated.data });
-      setExtractionJson(JSON.stringify(updated.data, null, 2));
+      setClinicalData(normalizeClinicalExtraction(updated.data));
       await loadSavedTranscripts();
       setStep(4);
     } catch (error) {
-      setWorkflowError(error instanceof ApiError ? `Die JSON-Korrektur konnte nicht gespeichert werden: ${error.message}` : "Die JSON-Korrektur konnte nicht gespeichert werden. Bitte prüfen Sie Feldnamen und Datentypen.");
+      setWorkflowError(error instanceof ApiError ? `Die klinischen Angaben konnten nicht gespeichert werden: ${error.message}` : "Die klinischen Angaben konnten nicht gespeichert werden. Bitte prüfen Sie die eingegebenen Werte.");
     } finally { setBusy(false); }
   }
 
@@ -475,7 +469,7 @@ function Documentation({
     {workflowError && <div className="alert alert-error workflow-alert" role="alert">{workflowError}</div>}
     {step === 1 && <section className="recorder-panel"><div className="section-heading"><div><p className="eyebrow">SCHRITT 1 VON 5</p><h2>Sprache aufnehmen</h2></div><span className={`recording-state ${recorder.status}`}><span className="recording-dot" /> {recorderStatusLabel(recorder.status)}</span></div><div className="recorder-stage"><div className={`mic-ring ${recorder.status === "recording" ? "is-recording" : ""}`}><Icon name="mic" /></div><strong className="duration">{formatDuration(recorder.durationSeconds)}</strong><span className="muted">{recorder.status === "idle" ? "Bereit für die Aufnahme" : "Aufnahme bleibt bis zum Upload temporär im Arbeitsspeicher"}</span></div>{recorder.error && <div className="alert alert-error" role="alert">{recorder.error}</div>}<div className="recorder-controls">{recorder.status === "idle" || recorder.status === "error" ? <button className="button button-record" onClick={startRecording}><Icon name="mic" /> Aufnahme starten</button> : recorder.status === "recording" ? <><button className="button button-secondary" onClick={pauseRecording}><Icon name="pause" /> Pausieren</button><button className="button button-record" onClick={stopRecording}><span className="stop-square" /> Stoppen</button></> : recorder.status === "paused" ? <><button className="button button-primary" onClick={resumeRecording}><Icon name="play" /> Fortsetzen</button><button className="button button-record" onClick={stopRecording}><span className="stop-square" /> Stoppen</button></> : <><button className="button button-secondary" onClick={discardRecording}>Verwerfen</button>{audioUrl && <audio controls src={audioUrl} aria-label="Aufnahme abspielen" />}<button className="button button-primary" onClick={uploadAndTranscribe} disabled={busy || !audioBlob}>{busy ? "Upload läuft …" : "Upload & weiter"}</button></>}</div>{recorder.status === "stopped" && <div className="notice notice-info" role="status"><span className="notice-icon">i</span><div><strong>Aufnahme beendet</strong><p>Hören Sie die Aufnahme bei Bedarf noch einmal an. Mit „Upload & weiter“ wird sie geschützt gespeichert und zur Transkription weitergeleitet.</p></div></div>}<div className="recorder-footnote"><span className="status-dot" /> Mikrofon wird nur nach Ihrer ausdrücklichen Aktion aktiviert <span className="divider" /> <span className="muted">Keine Speicherung in localStorage, sessionStorage oder IndexedDB</span></div></section>}
     {step === 2 && transcript && <section className="review-panel"><WorkflowHeading step="2" title="Transkript prüfen" /><p className="muted">Korrigieren Sie nur erkennbare Transkriptionsfehler. Die klinische Extraktion verwendet genau diesen Text.</p><textarea className="review-textarea" value={transcript.text} onChange={(event) => setTranscript({ ...transcript, text: event.target.value })} aria-label="Transkript" /><div className="workflow-actions"><button className="button button-secondary" onClick={resetWorkflow}>Abbrechen &amp; später fortsetzen</button><button className="button button-primary" onClick={extractTranscript} disabled={busy}>{busy ? "Extraktion läuft …" : "Weiter zur klinischen Extraktion"}</button></div></section>}
-    {step === 3 && extraction && <section className="review-panel"><WorkflowHeading step="3" title="Klinische Informationen prüfen" /><p className="muted">Dev-Modus: Sie können die strukturierte JSON-Extraktion direkt korrigieren. Die Änderung wird vor dem Bericht gespeichert.</p><textarea className="review-textarea json-editor" value={extractionJson} onChange={(event) => setExtractionJson(event.target.value)} aria-label="Klinische Extraktion als JSON" spellCheck={false} /><div className="workflow-actions"><button className="button button-secondary" onClick={resetWorkflow}>Abbrechen &amp; später fortsetzen</button><button className="button button-primary" onClick={saveExtractionAndContinue} disabled={busy}>{busy ? "JSON wird gespeichert …" : "JSON speichern und weiter"}</button></div></section>}
+    {step === 3 && extraction && clinicalData && <section className="review-panel"><WorkflowHeading step="3" title="Klinische Informationen prüfen" /><ClinicalInformationForm data={clinicalData} onChange={setClinicalData} /><div className="workflow-actions"><button className="button button-secondary" onClick={resetWorkflow}>Abbrechen &amp; später fortsetzen</button><button className="button button-primary" onClick={saveExtractionAndContinue} disabled={busy}>{busy ? "Angaben werden gespeichert …" : "Angaben speichern und weiter"}</button></div></section>}
     {step === 4 && draft && <section className="review-panel"><WorkflowHeading step="4" title="Bericht bearbeiten" /><p className="muted">Der Bericht bleibt bis zur manuellen Freigabe ein Entwurf.</p><textarea className="review-textarea report-textarea" value={draft.report_text} onChange={(event) => setDraft({ ...draft, report_text: event.target.value })} aria-label="Pflegebericht-Entwurf" /><div className="workflow-actions"><button className="button button-secondary" onClick={resetWorkflow}>Abbrechen &amp; später fortsetzen</button><button className="button button-primary" onClick={saveDraftAndReview} disabled={busy}>{busy ? "Speichern läuft …" : "Weiter zur Freigabe"}</button></div></section>}
     {step === 5 && draft && <section className="review-panel"><WorkflowHeading step="5" title="Prüfen & freigeben" /><p className="muted">Lesen Sie den vollständigen Bericht vor der Freigabe sorgfältig durch.</p><div className="report-preview">{draft.report_text}</div>{approved ? <div className="notice notice-info" role="status"><span className="notice-icon">✓</span><div><strong>Dokumentation freigegeben</strong><p>{submissionStatus === "submitted" ? "Die Dokumentation wurde freigegeben und an das Pflege-Monitoring zur Speicherung weitergeleitet." : "Die Dokumentation wurde freigegeben, konnte aber noch nicht an das Pflege-Monitoring übertragen werden. Bitte prüfen Sie die Backend-Logs."}</p></div></div> : <div className="workflow-actions"><button className="button button-secondary" onClick={resetWorkflow}>Abbrechen &amp; später fortsetzen</button><button className="button button-primary" onClick={approveDraft} disabled={busy}>{busy ? "Freigabe läuft …" : "Manuell freigeben"}</button></div>}</section>}
     </>}

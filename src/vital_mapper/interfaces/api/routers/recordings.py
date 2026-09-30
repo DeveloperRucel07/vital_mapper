@@ -15,7 +15,7 @@ from vital_mapper.application.use_cases.extract_clinical_data import ExtractClin
 from vital_mapper.application.use_cases.transcribe_recording import TranscribeRecordingUseCase
 from vital_mapper.config import settings
 from vital_mapper.domain.entities import UserRole
-from vital_mapper.domain.exceptions import AccessDeniedError
+from vital_mapper.domain.exceptions import AccessDeniedError, AudioRetentionExpiredError
 from vital_mapper.infrastructure.events.redis_event_bus import RedisEventBus
 from vital_mapper.infrastructure.interop.gateway_adapter import HttpInteropGatewayAdapter
 from vital_mapper.infrastructure.interop.patient_access_adapter import GatewayPatientAccessAdapter
@@ -115,12 +115,18 @@ async def transcribe_recording(
         await _patient_access().assert_access(recording.patient_ref, _require_token(user))
     except AccessDeniedError as exc:
         raise _map_access_error(exc) from exc
-    transcript = await TranscribeRecordingUseCase(
-        WhisperTranscriptionAdapter(settings.whisper_base_url),
-        repository,
-        EncryptedAudioStorage(settings.audio_storage_path),
-        RedisEventBus(settings.redis_url),
-    ).execute(recording_id)
+    try:
+        transcript = await TranscribeRecordingUseCase(
+            WhisperTranscriptionAdapter(settings.whisper_base_url),
+            repository,
+            EncryptedAudioStorage(settings.audio_storage_path),
+            RedisEventBus(settings.redis_url),
+        ).execute(recording_id)
+    except AudioRetentionExpiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Die Aufbewahrungsdauer der Audiodatei ist abgelaufen.",
+        ) from exc
     await log_access(user.subject, recording.patient_ref, "transcribe_recording")
     return {
         "id": str(transcript.id),

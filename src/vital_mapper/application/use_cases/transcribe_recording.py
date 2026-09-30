@@ -7,6 +7,7 @@ from vital_mapper.application.ports.repository_port import RepositoryPort
 from vital_mapper.application.ports.transcription_port import TranscriptionPort
 from vital_mapper.domain.entities import Transcript
 from vital_mapper.domain.events import DomainEvent, EventType
+from vital_mapper.domain.exceptions import AudioRetentionExpiredError
 
 
 class TranscribeRecordingUseCase:
@@ -24,6 +25,10 @@ class TranscribeRecordingUseCase:
 
     async def execute(self, recording_id: uuid.UUID) -> Transcript:
         recording = await self._repository.get_recording(recording_id)
+        if not recording.audio_ref:
+            raise AudioRetentionExpiredError(
+                f"Rohaudio fuer Recording {recording_id} wurde fristgerecht geloescht."
+            )
         audio = await self._audio_storage.load(recording.audio_ref)
         text, confidence, model_version = await self._transcription.transcribe(audio)
 

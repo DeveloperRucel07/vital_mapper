@@ -1,8 +1,14 @@
+import base64
+import binascii
+from typing import Self
+from urllib.parse import parse_qs, urlparse
+
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     app_env: str = "development"
     log_level: str = "INFO"
@@ -41,10 +47,72 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str | None = None
     bootstrap_admin_password: str | None = None
     audio_encryption_key: str
+    clinical_data_encryption_key: str = ""
     audio_storage_path: str = "/var/lib/vital-mapper/audio"
     max_audio_bytes: int = 25_000_000
 
-    audio_retention_days: int = 30
+    audio_retention_days: int = Field(default=30, ge=1)
+    audio_retention_check_seconds: int = Field(default=3600, ge=60)
+
+    @field_validator("audio_encryption_key", "clinical_data_encryption_key")
+    @classmethod
+    def validate_fernet_key(cls, value: str) -> str:
+        """Akzeptiert nur URL-safe Base64-Schluessel mit 32 Byte Nutzlaenge."""
+
+        if not value:
+            return value
+        try:
+            decoded = base64.urlsafe_b64decode(value.encode("ascii"))
+        except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
+            raise ValueError("Ungueltiger Fernet-Schluessel.") from exc
+        if len(decoded) != 32:
+            raise ValueError("Ungueltiger Fernet-Schluessel.")
+        return value
+
+    @model_validator(mode="after")
+    def require_secure_production_transport(self) -> Self:
+        """Verhindert unverschluesselte Produktionskonfigurationen (F-26)."""
+
+        if self.app_env.lower() not in {"production", "prod"}:
+            return self
+
+        insecure: list[str] = []
+        https_settings = {
+            "OLLAMA_BASE_URL": self.ollama_base_url,
+            "WHISPER_BASE_URL": self.whisper_base_url,
+            "FHIR_BASE_URL": self.fhir_base_url,
+            "KEYCLOAK_ISSUER": self.keycloak_issuer,
+            "KEYCLOAK_JWKS_URL": self.keycloak_jwks_url,
+            "OIDC_AUTHORIZATION_URL": self.oidc_authorization_url,
+            "OIDC_TOKEN_URL": self.oidc_token_url,
+            "OIDC_LOGOUT_URL": self.oidc_logout_url,
+            "APP_ORIGIN": self.app_origin,
+            "INTEROP_GATEWAY_URL": self.interop_gateway_url,
+        }
+        for name, value in https_settings.items():
+            if value and not value.lower().startswith("https://"):
+                insecure.append(name)
+        if not self.redis_url.lower().startswith("rediss://"):
+            insecure.append("REDIS_URL")
+        if not self.bff_redis_url.lower().startswith("rediss://"):
+            insecure.append("BFF_REDIS_URL")
+        database_query = parse_qs(urlparse(self.database_url).query)
+        ssl_mode = (database_query.get("ssl") or database_query.get("sslmode") or [""])[0]
+        if ssl_mode.lower() not in {"require", "verify-ca", "verify-full", "true"}:
+            insecure.append("DATABASE_URL")
+        if not self.bff_cookie_secure:
+            insecure.append("BFF_COOKIE_SECURE")
+        if self.legacy_auth_enabled:
+            insecure.append("LEGACY_AUTH_ENABLED")
+        if not self.clinical_data_encryption_key:
+            insecure.append("CLINICAL_DATA_ENCRYPTION_KEY")
+        elif self.clinical_data_encryption_key == self.audio_encryption_key:
+            insecure.append("CLINICAL_DATA_ENCRYPTION_KEY_KEY_SEPARATION")
+
+        if insecure:
+            names = ", ".join(sorted(set(insecure)))
+            raise ValueError(f"Unsichere Produktionskonfiguration fuer: {names}")
+        return self
 
 
 # Pydantic Settings befuellt diese Pflichtfelder zur Laufzeit aus env/.env.

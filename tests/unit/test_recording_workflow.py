@@ -1,9 +1,12 @@
 import uuid
 from datetime import UTC, datetime
 
+import pytest
+
 from vital_mapper.application.use_cases.create_recording import CreateRecordingUseCase
 from vital_mapper.application.use_cases.transcribe_recording import TranscribeRecordingUseCase
 from vital_mapper.domain.entities import Recording, Transcript
+from vital_mapper.domain.exceptions import AudioRetentionExpiredError
 
 
 class FakeAccess:
@@ -97,3 +100,19 @@ async def test_transcription_loads_audio_bytes_from_storage() -> None:
 
     assert transcript.text == "Puls 76"
     assert repository.transcript == transcript
+
+
+async def test_transcription_rejects_audio_removed_by_retention() -> None:
+    repository = FakeRepository()
+    repository.recording = Recording(
+        id=uuid.uuid4(),
+        patient_ref="demo-patient",
+        author_id=uuid.uuid4(),
+        audio_ref="",
+        started_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(AudioRetentionExpiredError):
+        await TranscribeRecordingUseCase(
+            FakeTranscription(), repository, FakeStorage(), FakeEvents()
+        ).execute(repository.recording.id)

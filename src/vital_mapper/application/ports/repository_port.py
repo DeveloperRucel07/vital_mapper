@@ -35,6 +35,14 @@ class RepositoryPort(ABC):
     async def save_recording(self, recording: Recording) -> None: ...
 
     @abstractmethod
+    async def list_recordings_with_expired_audio(
+        self, cutoff: datetime, limit: int
+    ) -> list[Recording]: ...
+
+    @abstractmethod
+    async def mark_audio_deleted(self, recording_id: uuid.UUID) -> None: ...
+
+    @abstractmethod
     async def save_transcript(self, transcript: Transcript) -> None: ...
 
     @abstractmethod

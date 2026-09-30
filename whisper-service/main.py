@@ -4,19 +4,18 @@ Kapitel 10) und wird vom Backend ausschliesslich ueber HTTP angesprochen -
 Audiodaten verlassen dabei nie das lokale Docker-Netzwerk (Privacy by Design,
 F-26/F-28)."""
 
-import tempfile
+import io
 import os
 
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, HTTPException, UploadFile, status
 from faster_whisper import WhisperModel
 
 app = FastAPI(title="Vital Mapper - Whisper Service")
 
 MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
 DEVICE = os.getenv("WHISPER_DEVICE", "cpu").lower()
-COMPUTE_TYPE = os.getenv(
-    "WHISPER_COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int8"
-)
+COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int8")
+MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", "25000000"))
 _model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
 
 # Domaenenspezifisches Vokabular als Prompt-Priming (F-36: Pflegefachbegriffe
@@ -29,13 +28,18 @@ NURSING_VOCABULARY_PROMPT = (
 
 @app.post("/transcribe")
 async def transcribe(audio: UploadFile, language: str = "de") -> dict:
-    with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
-        tmp.write(await audio.read())
-        tmp.flush()
-        segments, info = _model.transcribe(
-            tmp.name, language=language, initial_prompt=NURSING_VOCABULARY_PROMPT
+    """Transkribiert im Arbeitsspeicher, ohne Klartext-Audiodatei (F-26)."""
+
+    data = await audio.read(MAX_AUDIO_BYTES + 1)
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Die Aufnahme ist zu gross.",
         )
-        text = " ".join(segment.text.strip() for segment in segments)
+    segments, info = _model.transcribe(
+        io.BytesIO(data), language=language, initial_prompt=NURSING_VOCABULARY_PROMPT
+    )
+    text = " ".join(segment.text.strip() for segment in segments)
 
     return {
         "text": text,

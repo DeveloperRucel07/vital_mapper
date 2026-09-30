@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -83,14 +84,101 @@ def _numeric_value_is_grounded(value: str, transcript: str) -> bool:
     return False
 
 
-def _sanitize_ungrounded_numeric_values(
+def _normalized_text(value: str) -> str:
+    """Normalisiert Freitext fuer einen konservativen Faktenabgleich (F-08)."""
+
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    without_accents = "".join(
+        character for character in decomposed if not unicodedata.combining(character)
+    )
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", without_accents)).strip()
+
+
+def _text_value_is_grounded(value: str, transcript: str) -> bool:
+    """Erlaubt Freitext nur, wenn er als zusammenhaengende Aussage vorkommt."""
+
+    normalized_value = _normalized_text(value)
+    normalized_transcript = _normalized_text(transcript)
+    if not normalized_value:
+        return False
+    if f" {normalized_value} " in f" {normalized_transcript} ":
+        return True
+
+    def token_pattern(token: str) -> str:
+        stem = re.sub(r"(?:ern|em|en|es|er|e)$", "", token)
+        return re.escape(stem) + r"\w*" if len(stem) >= 4 else re.escape(token)
+
+    pattern = (
+        r"\b" + r"\s+".join(token_pattern(token) for token in normalized_value.split()) + r"\b"
+    )
+    return bool(re.search(pattern, normalized_transcript))
+
+
+def _pain_value_is_grounded(value: bool, transcript: str) -> bool:
+    """Prueft Schmerz- und explizite Schmerzverneinungen getrennt (F-08/F-09)."""
+
+    normalized = _normalized_text(transcript)
+    pain_is_negated = bool(
+        re.search(r"\b(keine?|ohne|verneint) schmerzen?\b|\bschmerzfrei\b", normalized)
+    )
+    pain_is_mentioned = bool(re.search(r"\bschmerzen?\b|\bschmerzfrei\b", normalized))
+    return pain_is_mentioned and (not pain_is_negated if value else pain_is_negated)
+
+
+def _fall_value_is_grounded(value: bool, transcript: str) -> bool:
+    """Prueft Sturzereignisse einschliesslich expliziter Verneinung (F-08)."""
+
+    normalized = _normalized_text(transcript)
+    fall_is_negated = bool(
+        re.search(r"\b(kein|keine|ohne) sturz(?:ereignis)?\b|\bnicht gesturzt\b", normalized)
+    )
+    fall_is_mentioned = bool(re.search(r"\bsturz(?:ereignis)?\b|\bgesturzt\b", normalized))
+    return fall_is_mentioned and (not fall_is_negated if value else fall_is_negated)
+
+
+def _enum_value_is_grounded(path: str, value: str, transcript: str) -> bool:
+    """Ordnet nur klar benannte Fachformulierungen den Enum-Werten zu (F-08)."""
+
+    normalized = _normalized_text(transcript)
+    patterns: dict[tuple[str, str], tuple[str, ...]] = {
+        ("mobilitaet.status", "selbststaendig"): (r"\bselbststandig\b",),
+        ("mobilitaet.status", "rollator"): (r"\brollator\b",),
+        ("mobilitaet.status", "unterstuetzung"): (
+            r"\bunterstutzung\b",
+            r"\bmit hilfe\b",
+            r"\bbenotigt hilfe\b",
+            r"\bassistenz\b",
+        ),
+        ("mobilitaet.gangbild", "sicher"): (
+            r"\b(?:gang|gangbild|mobilitat)\b.{0,30}\bsicher\b",
+            r"\bsicher\b.{0,30}\b(?:gang|gangbild|mobilitat)\b",
+        ),
+        ("mobilitaet.gangbild", "unsicher"): (
+            r"\b(?:gang|gangbild|mobilitat)\b.{0,30}\bunsicher\b",
+            r"\bunsicher\b.{0,30}\b(?:gang|gangbild|mobilitat)\b",
+        ),
+        ("orientierung.status", "orientiert"): (r"\borientiert\b",),
+        ("orientierung.status", "desorientiert"): (r"\bdesorientiert\b",),
+        ("reaktion.typ", "verbesserung"): (
+            r"\bverbesser(?:ung|t)\b",
+            r"\bbesser\b",
+        ),
+        ("reaktion.typ", "verschlechterung"): (
+            r"\bverschlechter(?:ung|t)\b",
+            r"\bschlechter\b",
+        ),
+    }
+    return any(re.search(pattern, normalized) for pattern in patterns.get((path, value), ()))
+
+
+def _sanitize_ungrounded_values(
     extraction: ClinicalExtraction, transcript: str
 ) -> ClinicalExtraction:
-    """Entfernt ungroundete Zahlen und markiert sie als unsicher (F-08/F-15).
+    """Entfernt unbelegte Fakten und markiert sie als unsicher (F-08/F-15).
 
-    Ein einzelner Halluzinationswert darf die gesamte klinische Extraktion
-    nicht in einen HTTP-500-Fehler verwandeln. Der Wert wird deshalb verworfen;
-    der nachgelagerte Grounding-Check bleibt als Sicherheitsnetz aktiv.
+    Ein Halluzinationswert darf die gesamte klinische Extraktion nicht in einen
+    HTTP-500-Fehler verwandeln. Er wird deshalb verworfen; der nachgelagerte
+    Grounding-Check bleibt als nicht umgehbares Sicherheitsnetz aktiv.
     """
 
     normalized = _normalize_number_words(re.sub(r"\s+", " ", transcript.lower()))
@@ -104,8 +192,36 @@ def _sanitize_ungrounded_numeric_values(
         ("fluessigkeit", "menge_ml"),
         ("ernaehrung", "anteil_prozent"),
     )
+    text_fields: tuple[tuple[str, str], ...] = (
+        ("schmerz", "lokalisation"),
+        ("fluessigkeit", "getraenk"),
+        ("ernaehrung", "beschreibung"),
+        ("ausscheidung", "urin"),
+        ("ausscheidung", "stuhl"),
+        ("sturz", "zeitpunkt"),
+        ("sturz", "verletzung"),
+        ("sturz", "bewusstsein"),
+        ("intervention", "typ"),
+        ("intervention", "beschreibung"),
+        ("reaktion", "beschreibung"),
+    )
+    enum_fields: tuple[tuple[str, str], ...] = (
+        ("mobilitaet", "status"),
+        ("mobilitaet", "gangbild"),
+        ("orientierung", "status"),
+        ("reaktion", "typ"),
+    )
     parent_updates: dict[str, Any] = {}
     uncertain_fields = list(extraction.unsichere_felder)
+
+    def clear_field(parent_name: str, field_name: str) -> None:
+        parent = parent_updates.get(parent_name, getattr(extraction, parent_name))
+        if parent is None:
+            return
+        parent_updates[parent_name] = parent.model_copy(update={field_name: None})
+        path = f"{parent_name}.{field_name}"
+        if path not in uncertain_fields:
+            uncertain_fields.append(path)
 
     for parent_name, field_name in numeric_fields:
         parent = parent_updates.get(parent_name, getattr(extraction, parent_name))
@@ -114,10 +230,32 @@ def _sanitize_ungrounded_numeric_values(
         value = getattr(parent, field_name)
         if value is None or _numeric_value_is_grounded(str(value), normalized):
             continue
-        parent_updates[parent_name] = parent.model_copy(update={field_name: None})
+        clear_field(parent_name, field_name)
+
+    for parent_name, field_name in text_fields:
+        parent = parent_updates.get(parent_name, getattr(extraction, parent_name))
+        if parent is None:
+            continue
+        value = getattr(parent, field_name)
+        if value is not None and not _text_value_is_grounded(value, transcript):
+            clear_field(parent_name, field_name)
+
+    if extraction.schmerz and extraction.schmerz.vorhanden is not None:
+        if not _pain_value_is_grounded(extraction.schmerz.vorhanden, transcript):
+            clear_field("schmerz", "vorhanden")
+
+    if extraction.sturz and extraction.sturz.ereignis is not None:
+        if not _fall_value_is_grounded(extraction.sturz.ereignis, transcript):
+            clear_field("sturz", "ereignis")
+
+    for parent_name, field_name in enum_fields:
+        parent = parent_updates.get(parent_name, getattr(extraction, parent_name))
+        if parent is None:
+            continue
+        value = getattr(parent, field_name)
         path = f"{parent_name}.{field_name}"
-        if path not in uncertain_fields:
-            uncertain_fields.append(path)
+        if value is not None and not _enum_value_is_grounded(path, value, transcript):
+            clear_field(parent_name, field_name)
 
     if not parent_updates and uncertain_fields == extraction.unsichere_felder:
         return extraction
@@ -149,43 +287,131 @@ class OllamaExtractionAdapter(ExtractionPort):
 
         extraction = ClinicalExtraction.model_validate_json(content)
         extraction = apply_explicit_grounded_facts(extraction, transcript_text)
-        extraction = _sanitize_ungrounded_numeric_values(extraction, transcript_text)
+        extraction = _sanitize_ungrounded_values(extraction, transcript_text)
         self._assert_grounded(extraction, transcript_text)
         return extraction, self._model
 
     @staticmethod
     def _assert_grounded(extraction: ClinicalExtraction, transcript_text: str) -> None:
-        """MVP-Grounding-Check: numerische Werte muessen im Transkript
-        auftauchen. Fuer Freitextfelder (z. B. Lokalisation, Beschreibung)
-        empfiehlt sich spaeter ein Embedding-basierter Aehnlichkeitscheck
-        statt reinem String-Match - siehe Anforderungsdokument Kapitel 12
-        (offener Punkt: Deidentifikations-/Extraktions-Qualitaetssicherung)."""
+        """Verwirft jede nicht im Transkript belegte Extraktion (F-08/F-15)."""
         normalized = re.sub(r"\s+", " ", transcript_text.lower())
         normalized = _normalize_number_words(normalized)
-        numeric_values: list[str] = []
+        checks: list[tuple[str, bool]] = []
 
         if extraction.vitalparameter:
-            for value in (
-                extraction.vitalparameter.blutdruck_systolisch,
-                extraction.vitalparameter.blutdruck_diastolisch,
-                extraction.vitalparameter.puls,
-                extraction.vitalparameter.temperatur,
+            for path, value in (
+                (
+                    "vitalparameter.blutdruck_systolisch",
+                    extraction.vitalparameter.blutdruck_systolisch,
+                ),
+                (
+                    "vitalparameter.blutdruck_diastolisch",
+                    extraction.vitalparameter.blutdruck_diastolisch,
+                ),
+                ("vitalparameter.puls", extraction.vitalparameter.puls),
+                ("vitalparameter.temperatur", extraction.vitalparameter.temperatur),
+                ("vitalparameter.spo2", extraction.vitalparameter.spo2),
             ):
                 if value is not None:
-                    numeric_values.append(str(value))
+                    checks.append((path, _numeric_value_is_grounded(str(value), normalized)))
 
         if extraction.schmerz and extraction.schmerz.intensitaet_nrs is not None:
-            numeric_values.append(str(extraction.schmerz.intensitaet_nrs))
+            checks.append(
+                (
+                    "schmerz.intensitaet_nrs",
+                    _numeric_value_is_grounded(str(extraction.schmerz.intensitaet_nrs), normalized),
+                )
+            )
 
         if extraction.fluessigkeit and extraction.fluessigkeit.menge_ml is not None:
-            numeric_values.append(str(extraction.fluessigkeit.menge_ml))
+            checks.append(
+                (
+                    "fluessigkeit.menge_ml",
+                    _numeric_value_is_grounded(str(extraction.fluessigkeit.menge_ml), normalized),
+                )
+            )
 
         if extraction.ernaehrung and extraction.ernaehrung.anteil_prozent is not None:
-            numeric_values.append(str(extraction.ernaehrung.anteil_prozent))
+            checks.append(
+                (
+                    "ernaehrung.anteil_prozent",
+                    _numeric_value_is_grounded(
+                        str(extraction.ernaehrung.anteil_prozent), normalized
+                    ),
+                )
+            )
 
-        for extracted_value in numeric_values:
-            if not _numeric_value_is_grounded(extracted_value, normalized):
+        text_checks: tuple[tuple[str, Any], ...] = (
+            (
+                "schmerz.lokalisation",
+                extraction.schmerz.lokalisation if extraction.schmerz else None,
+            ),
+            (
+                "fluessigkeit.getraenk",
+                extraction.fluessigkeit.getraenk if extraction.fluessigkeit else None,
+            ),
+            (
+                "ernaehrung.beschreibung",
+                extraction.ernaehrung.beschreibung if extraction.ernaehrung else None,
+            ),
+            (
+                "ausscheidung.urin",
+                extraction.ausscheidung.urin if extraction.ausscheidung else None,
+            ),
+            (
+                "ausscheidung.stuhl",
+                extraction.ausscheidung.stuhl if extraction.ausscheidung else None,
+            ),
+            ("sturz.zeitpunkt", extraction.sturz.zeitpunkt if extraction.sturz else None),
+            ("sturz.verletzung", extraction.sturz.verletzung if extraction.sturz else None),
+            ("sturz.bewusstsein", extraction.sturz.bewusstsein if extraction.sturz else None),
+            ("intervention.typ", extraction.intervention.typ if extraction.intervention else None),
+            (
+                "intervention.beschreibung",
+                extraction.intervention.beschreibung if extraction.intervention else None,
+            ),
+            (
+                "reaktion.beschreibung",
+                extraction.reaktion.beschreibung if extraction.reaktion else None,
+            ),
+        )
+        for path, value in text_checks:
+            if value is not None:
+                checks.append((path, _text_value_is_grounded(value, transcript_text)))
+
+        if extraction.schmerz and extraction.schmerz.vorhanden is not None:
+            checks.append(
+                (
+                    "schmerz.vorhanden",
+                    _pain_value_is_grounded(extraction.schmerz.vorhanden, transcript_text),
+                )
+            )
+        if extraction.sturz and extraction.sturz.ereignis is not None:
+            checks.append(
+                (
+                    "sturz.ereignis",
+                    _fall_value_is_grounded(extraction.sturz.ereignis, transcript_text),
+                )
+            )
+
+        enum_checks: tuple[tuple[str, Any], ...] = (
+            ("mobilitaet.status", extraction.mobilitaet.status if extraction.mobilitaet else None),
+            (
+                "mobilitaet.gangbild",
+                extraction.mobilitaet.gangbild if extraction.mobilitaet else None,
+            ),
+            (
+                "orientierung.status",
+                extraction.orientierung.status if extraction.orientierung else None,
+            ),
+            ("reaktion.typ", extraction.reaktion.typ if extraction.reaktion else None),
+        )
+        for path, value in enum_checks:
+            if value is not None:
+                checks.append((path, _enum_value_is_grounded(path, value, transcript_text)))
+
+        for path, is_grounded in checks:
+            if not is_grounded:
                 raise UngroundedExtractionError(
-                    f"Wert '{extracted_value}' wurde extrahiert, kommt aber nicht im "
-                    "Transkript vor."
+                    f"Feld '{path}' wurde extrahiert, ist aber nicht im Transkript belegt."
                 )

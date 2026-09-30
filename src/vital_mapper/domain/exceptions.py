@@ -30,6 +30,10 @@ class RecordingNotFoundError(DomainError):
     """Die angeforderte Aufnahme existiert nicht."""
 
 
+class AudioRetentionExpiredError(DomainError):
+    """Das Rohaudio wurde gemaess der Aufbewahrungsregel geloescht (F-27)."""
+
+
 class TranscriptNotFoundError(DomainError):
     """Das angeforderte Transkript existiert nicht."""
 
