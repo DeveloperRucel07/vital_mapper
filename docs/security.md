@@ -37,6 +37,7 @@ Stand: 2026-09-30
 |---|---|---|
 | Datenminimierung | Persistente klinische Datensaetze verwenden `patient_ref` statt lokaler Patientenstammdaten. | F-28 |
 | Audioablage | Hochgeladene Audiodaten werden mit Fernet verschluesselt und ohne Originaldateinamen gespeichert. | F-26 |
+| Offline-Aufnahmen | Bei nicht erreichbarem Backend wird die Aufnahme per AES-256-GCM im Browser verschluesselt zwischengespeichert und bei Rueckkehr der Verbindung automatisch uebertragen. | F-26, F-34 |
 | Dateizugriff | Audio-Referenzen werden gegen Path Traversal validiert. | F-26 |
 | Audio-Retention | Ein Hintergrundprozess loescht abgelaufene Audiodateien nach `AUDIO_RETENTION_DAYS` und leert anschliessend ihre Referenz. | F-27 |
 | Transkriptablage | Neue Transkripte werden mit einem versionierten Fernet-Format verschluesselt; vorhandene Klartexte werden vor Annahme von API-Verkehr beim Start migriert. | F-26 |
@@ -55,7 +56,6 @@ Stand: 2026-09-30
 | Prioritaet | Befund | Betroffene Anforderungen |
 |---|---|---|
 | Hoch | TLS-Zertifikate, interne PKI und die tatsaechliche TLS-Terminierung werden ausserhalb dieses Repositories bereitgestellt und muessen im Zielbetrieb nachgewiesen werden. | F-26, R-05 |
-| Kritisch | Bei Verbindungsabbruch existiert kein verschluesselter lokaler Aufnahme-Puffer und keine automatische Wiederaufnahme der Synchronisation. | F-34, UC-08 |
 | Hoch | Auditdaten werden nur strukturiert geloggt; eine manipulationssichere, persistente Audit-Senke fehlt. | F-33, NF-06 |
 | Hoch | Aenderungen an Transkript, Extraktion und Bericht erzeugen nicht durchgaengig automatisch einen Vorher-/Nachher-Nachweis. | F-21 |
 | Hoch | Die Outbox besitzt keinen nachgewiesenen Worker fuer Retry, Idempotenz und Statusfortschritt. | F-20, F-23, F-33 |
@@ -306,6 +306,60 @@ im geprueften Transkript belegt sind.
 - Die Regeln brauchen vor einem produktiven Rollout eine fachliche Evaluation
   mit reprasentativen, vollstaendig synthetischen Testtranskripten aus dem
   Pflegekontext. Die manuelle fachliche Pruefung bleibt verpflichtend.
+
+### 2026-09-30 - Verschluesselter Offline-Puffer fuer Aufnahmen
+
+**Anforderungen:** F-26, F-34, UC-08
+
+**Ziel:** Eine Aufnahme darf bei einem Verbindungsabbruch nicht verloren gehen
+und darf lokal nie als Klartext persistiert werden.
+
+**Umsetzung:**
+
+- Der Browser speichert eine fehlgeschlagene Aufnahme erst nach AES-256-GCM-
+  Verschluesselung in IndexedDB. Der Initialisierungsvektor, der Chiffrattext,
+  Patientenkontext, Bearbeiter, Zeitpunkt und MIME-Typ bleiben nicht im
+  Klartext erhalten.
+- Der AES-Schluessel ist nicht exportierbar und wird getrennt vom Chiffrat als
+  `CryptoKey` im Browser-IndexedDB-Speicher abgelegt. Ist Web Crypto oder
+  IndexedDB nicht sicher verfuegbar, wird bewusst kein Klartext-Fallback
+  verwendet.
+- Bei `online` synchronisiert die Anwendung wartende Aufnahmen automatisch.
+  Der lokale Chiffrattext wird erst nach erfolgreichem Upload und erfolgreicher
+  Transkriptionsanfrage geloescht. Pflegefachkraefte sehen den Wartestatus und
+  koennen eine lokale Aufnahme bewusst verwerfen.
+- Jede Aufnahme besitzt schon vor dem ersten Upload eine zufaellige,
+  clientseitige UUID. Wiederholte Offline-Uploads verwenden dieselbe UUID;
+  der Recording-Use-Case erkennt bei identischem Autor und Patientenkontext
+  den sicheren Wiederholungsversuch und erzeugt keine Dublette.
+
+**Geaenderte Komponenten:**
+
+- `frontend/src/features/voice/offlineRecordingQueue.ts`
+- `frontend/src/features/voice/offlineRecordingQueue.test.ts`
+- `frontend/src/app/App.tsx`, `frontend/src/app/styles.css`
+- `src/vital_mapper/application/use_cases/create_recording.py`
+- `src/vital_mapper/interfaces/api/routers/recordings.py`
+- `tests/unit/test_recording_workflow.py`
+
+**Verifikation:**
+
+- AES-GCM-Roundtrip mit vollstaendig synthetischer Aufnahme getestet; der
+  Chiffrattext enthaelt keine lesbare Patientenreferenz.
+- Wiederholter Create-Recording-Use-Case mit derselben Client-UUID liefert die
+  urspruengliche Aufnahme statt einer neuen Dublette.
+- Python-Gesamtsuite: 49 erfolgreich; Ruff, Mypy und Bandit ohne Befund.
+- Frontend: 8 Tests und Produktions-Build erfolgreich.
+
+**Restrisiko und offene Punkte:**
+
+- Die Browserfunktion setzt ein verwaltetes, vertrauenswuerdiges Endgeraet und
+  einen aktuellen Browser mit Web Crypto und IndexedDB voraus. Die DSFA muss
+  den Einsatz auf gemeinsam genutzten Stationsgeraeten und die zugehoerigen
+  MDM-/Browserrichtlinien bewerten.
+- Eine serverseitige Warteschlange fuer eine erneut fehlgeschlagene
+  Transkription nach bereits erfolgreichem Upload ist weiterhin ein separater
+  Betriebsbaustein (F-23, NF-07).
 
 ## Vorlage fuer weitere Eintraege
 

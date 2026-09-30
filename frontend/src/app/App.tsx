@@ -11,6 +11,13 @@ import {
   recorderReducer,
   type RecorderStatus,
 } from "../features/voice/recorderMachine";
+import {
+  discardOfflineRecordings,
+  offlineRecordingCount as getOfflineRecordingCount,
+  queueOfflineRecording,
+  synchronizeOfflineRecordings,
+  type OfflineRecording,
+} from "../features/voice/offlineRecordingQueue";
 import { ClinicalInformationForm } from "../features/documentation/ClinicalInformationForm";
 import {
   normalizeClinicalExtraction,
@@ -74,6 +81,7 @@ function App() {
         {page === "documentation" && (
           <Documentation
             patientRef={selectedPatientRef}
+            userId={user?.id ?? ""}
             onChoosePatient={() => setPage("patients")}
             onSelectPatient={setSelectedPatientRef}
           />
@@ -258,10 +266,12 @@ type TranscriptWorkspaceResponse = {
 
 function Documentation({
   patientRef,
+  userId,
   onChoosePatient,
   onSelectPatient,
 }: {
   patientRef: string | null;
+  userId: string;
   onChoosePatient: () => void;
   onSelectPatient: (patientRef: string) => void;
 }) {
@@ -280,10 +290,13 @@ function Documentation({
   const [submissionStatus, setSubmissionStatus] = useState<ApprovalResponse["submission_status"] | null>(null);
   const [savedTranscripts, setSavedTranscripts] = useState<TranscriptWorkspaceItem[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+  const [offlineRecordingCount, setOfflineRecordingCount] = useState(0);
+  const [offlineSyncing, setOfflineSyncing] = useState(false);
   const [workspaceDay, setWorkspaceDay] = useState(() => new Date().toISOString().slice(0, 10));
   const mediaRecorder = useRef<MediaRecorder | null>(null);
   const stream = useRef<MediaStream | null>(null);
   const chunks = useRef<Blob[]>([]);
+  const offlineSyncInProgress = useRef(false);
 
   useEffect(() => {
     if (recorder.status !== "recording") return;
@@ -311,6 +324,41 @@ function Documentation({
   useEffect(() => {
     void loadSavedTranscripts();
   }, [loadSavedTranscripts]);
+
+  const uploadOfflineRecording = useCallback(async (offlineRecording: OfflineRecording) => {
+    const form = new FormData();
+    form.append("patient_ref", offlineRecording.patientRef);
+    form.append("client_recording_id", offlineRecording.recordingId);
+    form.append("started_at", offlineRecording.startedAt);
+    form.append("audio", offlineRecording.audio, "recording.webm");
+    const recording = await apiClient.postFormData<{ id: string }>("/recordings", form);
+    await apiClient.post<TranscriptResponse>(`/recordings/${recording.id}/transcribe`, {});
+  }, []);
+
+  const synchronizeOfflineQueue = useCallback(async () => {
+    if (!userId || !navigator.onLine || offlineSyncInProgress.current) return;
+    offlineSyncInProgress.current = true;
+    setOfflineSyncing(true);
+    try {
+      const result = await synchronizeOfflineRecordings(userId, uploadOfflineRecording);
+      setOfflineRecordingCount(result.remaining);
+      if (result.synchronized > 0) await loadSavedTranscripts();
+    } catch {
+      // Keine Klartext- oder Fehlermeldungsdetails aus dem lokalen Speicher anzeigen.
+    } finally {
+      offlineSyncInProgress.current = false;
+      setOfflineSyncing(false);
+    }
+  }, [loadSavedTranscripts, uploadOfflineRecording, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    void getOfflineRecordingCount(userId).then(setOfflineRecordingCount).catch(() => setOfflineRecordingCount(0));
+    const onOnline = () => void synchronizeOfflineQueue();
+    window.addEventListener("online", onOnline);
+    if (navigator.onLine) void synchronizeOfflineQueue();
+    return () => window.removeEventListener("online", onOnline);
+  }, [synchronizeOfflineQueue, userId]);
 
   function resetWorkflow() {
     if (mediaRecorder.current?.state !== "inactive") mediaRecorder.current?.stop();
@@ -389,21 +437,63 @@ function Documentation({
     dispatch({ type: "discard" });
   }
 
+  async function discardQueuedRecordings() {
+    if (!userId) return;
+    try {
+      await discardOfflineRecordings(userId);
+      setOfflineRecordingCount(0);
+      setWorkflowError(null);
+    } catch {
+      setWorkflowError("Die lokal gespeicherte Aufnahme konnte nicht gelöscht werden.");
+    }
+  }
+
   async function uploadAndTranscribe() {
     if (!audioBlob || !recordingStartedAt) return;
     setBusy(true); setWorkflowError(null);
+    const clientRecordingId = crypto.randomUUID();
+    let recording: { id: string };
     try {
       const form = new FormData();
       form.append("patient_ref", patientRef ?? "");
+      form.append("client_recording_id", clientRecordingId);
       form.append("started_at", recordingStartedAt);
       form.append("audio", audioBlob, "recording.webm");
-      const recording = await apiClient.postFormData<{ id: string }>("/recordings", form);
+      recording = await apiClient.postFormData<{ id: string }>("/recordings", form);
+    } catch (error) {
+      if (error instanceof ApiError && error.kind === "network" && userId && patientRef) {
+        try {
+          await queueOfflineRecording({
+            ownerId: userId,
+            patientRef,
+            recordingId: clientRecordingId,
+            startedAt: recordingStartedAt,
+            contentType: audioBlob.type || "audio/webm",
+            audio: audioBlob,
+          });
+          if (audioUrl) URL.revokeObjectURL(audioUrl);
+          setAudioUrl(null); setAudioBlob(null); setRecordingStartedAt(null);
+          setTranscript(null); setExtraction(null); setClinicalData(null); setDraft(null); setApproved(false); setStep(1);
+          chunks.current = [];
+          dispatch({ type: "discard" });
+          setOfflineRecordingCount((count) => count + 1);
+          setWorkflowError("Keine Verbindung: Die Aufnahme wurde verschlüsselt auf diesem Gerät zwischengespeichert und wird automatisch übertragen.");
+        } catch {
+          setWorkflowError("Keine Verbindung. Die Aufnahme konnte nicht verschlüsselt zwischengespeichert werden; bitte lassen Sie diese Ansicht geöffnet und versuchen Sie es erneut.");
+        }
+      } else {
+        setWorkflowError("Der Upload konnte nicht abgeschlossen werden. Bitte versuchen Sie es erneut.");
+      }
+      setBusy(false);
+      return;
+    }
+    try {
       const nextTranscript = await apiClient.post<TranscriptResponse>(`/recordings/${recording.id}/transcribe`, {});
       setTranscript(nextTranscript);
       await loadSavedTranscripts();
       setStep(2);
     } catch {
-      setWorkflowError("Upload oder Transkription konnte nicht abgeschlossen werden. Bitte versuchen Sie es erneut.");
+      setWorkflowError("Die Aufnahme wurde gespeichert, aber die Transkription konnte nicht abgeschlossen werden. Bitte öffnen Sie die Aufnahme später erneut.");
     } finally { setBusy(false); }
   }
 
@@ -467,7 +557,7 @@ function Documentation({
     <div className="page-heading compact-heading"><div><p className="eyebrow">DOKUMENTATION STARTEN</p><h1>Neue Pflegedokumentation</h1><p className="muted">Der Vorschlag bleibt bis zur fachlichen Freigabe ein Entwurf.</p></div><span className="draft-status"><span className="status-dot amber" /> Entwurf</span></div>
     <div className="stepper" aria-label="Dokumentationsschritte">{["Aufnahme", "Transkript", "Klinische Informationen", "Bericht", "Prüfen & Freigeben"].map((label, index) => <button key={label} className={`step ${index + 1 === step ? "current" : ""} ${index + 1 < step ? "complete" : ""}`} onClick={() => index + 1 <= step && setStep(index + 1)} disabled={index + 1 > step}><span>{index + 1 < step ? "✓" : index + 1}</span>{label}</button>)}</div>
     {workflowError && <div className="alert alert-error workflow-alert" role="alert">{workflowError}</div>}
-    {step === 1 && <section className="recorder-panel"><div className="section-heading"><div><p className="eyebrow">SCHRITT 1 VON 5</p><h2>Sprache aufnehmen</h2></div><span className={`recording-state ${recorder.status}`}><span className="recording-dot" /> {recorderStatusLabel(recorder.status)}</span></div><div className="recorder-stage"><div className={`mic-ring ${recorder.status === "recording" ? "is-recording" : ""}`}><Icon name="mic" /></div><strong className="duration">{formatDuration(recorder.durationSeconds)}</strong><span className="muted">{recorder.status === "idle" ? "Bereit für die Aufnahme" : "Aufnahme bleibt bis zum Upload temporär im Arbeitsspeicher"}</span></div>{recorder.error && <div className="alert alert-error" role="alert">{recorder.error}</div>}<div className="recorder-controls">{recorder.status === "idle" || recorder.status === "error" ? <button className="button button-record" onClick={startRecording}><Icon name="mic" /> Aufnahme starten</button> : recorder.status === "recording" ? <><button className="button button-secondary" onClick={pauseRecording}><Icon name="pause" /> Pausieren</button><button className="button button-record" onClick={stopRecording}><span className="stop-square" /> Stoppen</button></> : recorder.status === "paused" ? <><button className="button button-primary" onClick={resumeRecording}><Icon name="play" /> Fortsetzen</button><button className="button button-record" onClick={stopRecording}><span className="stop-square" /> Stoppen</button></> : <><button className="button button-secondary" onClick={discardRecording}>Verwerfen</button>{audioUrl && <audio controls src={audioUrl} aria-label="Aufnahme abspielen" />}<button className="button button-primary" onClick={uploadAndTranscribe} disabled={busy || !audioBlob}>{busy ? "Upload läuft …" : "Upload & weiter"}</button></>}</div>{recorder.status === "stopped" && <div className="notice notice-info" role="status"><span className="notice-icon">i</span><div><strong>Aufnahme beendet</strong><p>Hören Sie die Aufnahme bei Bedarf noch einmal an. Mit „Upload & weiter“ wird sie geschützt gespeichert und zur Transkription weitergeleitet.</p></div></div>}<div className="recorder-footnote"><span className="status-dot" /> Mikrofon wird nur nach Ihrer ausdrücklichen Aktion aktiviert <span className="divider" /> <span className="muted">Keine Speicherung in localStorage, sessionStorage oder IndexedDB</span></div></section>}
+    {step === 1 && <section className="recorder-panel"><div className="section-heading"><div><p className="eyebrow">SCHRITT 1 VON 5</p><h2>Sprache aufnehmen</h2></div><span className={`recording-state ${recorder.status}`}><span className="recording-dot" /> {recorderStatusLabel(recorder.status)}</span></div><div className="recorder-stage"><div className={`mic-ring ${recorder.status === "recording" ? "is-recording" : ""}`}><Icon name="mic" /></div><strong className="duration">{formatDuration(recorder.durationSeconds)}</strong><span className="muted">{recorder.status === "idle" ? "Bereit für die Aufnahme" : "Aufnahme bleibt bis zum Upload temporär im Arbeitsspeicher"}</span></div>{recorder.error && <div className="alert alert-error" role="alert">{recorder.error}</div>}<div className="recorder-controls">{recorder.status === "idle" || recorder.status === "error" ? <button className="button button-record" onClick={startRecording}><Icon name="mic" /> Aufnahme starten</button> : recorder.status === "recording" ? <><button className="button button-secondary" onClick={pauseRecording}><Icon name="pause" /> Pausieren</button><button className="button button-record" onClick={stopRecording}><span className="stop-square" /> Stoppen</button></> : recorder.status === "paused" ? <><button className="button button-primary" onClick={resumeRecording}><Icon name="play" /> Fortsetzen</button><button className="button button-record" onClick={stopRecording}><span className="stop-square" /> Stoppen</button></> : <><button className="button button-secondary" onClick={discardRecording}>Verwerfen</button>{audioUrl && <audio controls src={audioUrl} aria-label="Aufnahme abspielen" />}<button className="button button-primary" onClick={uploadAndTranscribe} disabled={busy || !audioBlob}>{busy ? "Upload läuft …" : "Upload & weiter"}</button></>}</div>{recorder.status === "stopped" && <div className="notice notice-info" role="status"><span className="notice-icon">i</span><div><strong>Aufnahme beendet</strong><p>Hören Sie die Aufnahme bei Bedarf noch einmal an. Mit „Upload & weiter“ wird sie geschützt gespeichert und zur Transkription weitergeleitet.</p></div></div>}{offlineRecordingCount > 0 && <div className="notice notice-warning offline-recording-notice" role="status"><span className="notice-icon">i</span><div><strong>{offlineSyncing ? "Zwischengespeicherte Aufnahme wird übertragen" : `${offlineRecordingCount} Aufnahme${offlineRecordingCount === 1 ? "" : "n"} wartet auf Übertragung`}</strong><p>Die Aufnahme liegt nur verschlüsselt auf diesem Gerät und wird nach erfolgreicher Übertragung automatisch entfernt.</p></div><button className="text-button" onClick={discardQueuedRecordings} disabled={offlineSyncing}>Lokal verwerfen</button></div>}<div className="recorder-footnote"><span className="status-dot" /> Mikrofon wird nur nach Ihrer ausdrücklichen Aktion aktiviert <span className="divider" /> <span className="muted">Keine Klartextspeicherung in Browser-Speichern</span></div></section>}
     {step === 2 && transcript && <section className="review-panel"><WorkflowHeading step="2" title="Transkript prüfen" /><p className="muted">Korrigieren Sie nur erkennbare Transkriptionsfehler. Die klinische Extraktion verwendet genau diesen Text.</p><textarea className="review-textarea" value={transcript.text} onChange={(event) => setTranscript({ ...transcript, text: event.target.value })} aria-label="Transkript" /><div className="workflow-actions"><button className="button button-secondary" onClick={resetWorkflow}>Abbrechen &amp; später fortsetzen</button><button className="button button-primary" onClick={extractTranscript} disabled={busy}>{busy ? "Extraktion läuft …" : "Weiter zur klinischen Extraktion"}</button></div></section>}
     {step === 3 && extraction && clinicalData && <section className="review-panel"><WorkflowHeading step="3" title="Klinische Informationen prüfen" /><ClinicalInformationForm data={clinicalData} onChange={setClinicalData} /><div className="workflow-actions"><button className="button button-secondary" onClick={resetWorkflow}>Abbrechen &amp; später fortsetzen</button><button className="button button-primary" onClick={saveExtractionAndContinue} disabled={busy}>{busy ? "Angaben werden gespeichert …" : "Angaben speichern und weiter"}</button></div></section>}
     {step === 4 && draft && <section className="review-panel"><WorkflowHeading step="4" title="Bericht bearbeiten" /><p className="muted">Der Bericht bleibt bis zur manuellen Freigabe ein Entwurf.</p><textarea className="review-textarea report-textarea" value={draft.report_text} onChange={(event) => setDraft({ ...draft, report_text: event.target.value })} aria-label="Pflegebericht-Entwurf" /><div className="workflow-actions"><button className="button button-secondary" onClick={resetWorkflow}>Abbrechen &amp; später fortsetzen</button><button className="button button-primary" onClick={saveDraftAndReview} disabled={busy}>{busy ? "Speichern läuft …" : "Weiter zur Freigabe"}</button></div></section>}

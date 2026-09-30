@@ -6,7 +6,7 @@ import pytest
 from vital_mapper.application.use_cases.create_recording import CreateRecordingUseCase
 from vital_mapper.application.use_cases.transcribe_recording import TranscribeRecordingUseCase
 from vital_mapper.domain.entities import Recording, Transcript
-from vital_mapper.domain.exceptions import AudioRetentionExpiredError
+from vital_mapper.domain.exceptions import AudioRetentionExpiredError, RecordingNotFoundError
 
 
 class FakeAccess:
@@ -45,7 +45,8 @@ class FakeRepository:
         self.recording = recording
 
     async def get_recording(self, recording_id):
-        assert self.recording is not None
+        if self.recording is None:
+            raise RecordingNotFoundError(str(recording_id))
         return self.recording
 
     async def save_transcript(self, transcript) -> None:
@@ -81,6 +82,35 @@ async def test_recording_is_access_checked_and_stored_before_persistence() -> No
     assert storage.audio == b"synthetic audio"
     assert repository.recording == recording
     assert recording.audio_ref == "recording.enc"
+
+
+async def test_recording_replay_returns_the_original_recording() -> None:
+    access = FakeAccess()
+    storage = FakeStorage()
+    repository = FakeRepository()
+    recording_id = uuid.uuid4()
+    first = await CreateRecordingUseCase(repository, storage, access).execute(
+        "demo-patient",
+        uuid.uuid4(),
+        "opaque-test-token",
+        b"synthetic audio",
+        "audio/webm",
+        datetime.now(UTC),
+        datetime.now(UTC),
+        recording_id,
+    )
+    replayed = await CreateRecordingUseCase(repository, storage, access).execute(
+        "demo-patient",
+        first.author_id,
+        "opaque-test-token",
+        b"synthetic audio",
+        "audio/webm",
+        datetime.now(UTC),
+        datetime.now(UTC),
+        recording_id,
+    )
+
+    assert replayed == first
 
 
 async def test_transcription_loads_audio_bytes_from_storage() -> None:

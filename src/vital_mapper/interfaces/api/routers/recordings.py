@@ -54,6 +54,7 @@ def _map_access_error(exc: AccessDeniedError) -> HTTPException:
 async def create_recording(
     patient_ref: str = Form(...),
     started_at: datetime | None = Form(default=None),
+    client_recording_id: str | None = Form(default=None),
     audio: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
     user: CurrentUser = Depends(require_role(UserRole.PFLEGEFACHKRAFT, UserRole.SCHICHTLEITUNG)),
@@ -62,6 +63,10 @@ async def create_recording(
         patient = PatientContextRequest(patient_ref=patient_ref)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Ungueltiger Patientenkontext.") from exc
+    try:
+        recording_id = uuid.UUID(client_recording_id) if client_recording_id else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Ungueltige Aufnahme-ID.") from exc
     content_type = (audio.content_type or "").split(";", 1)[0].strip().lower()
     allowed_types = {
         "audio/webm",
@@ -90,6 +95,7 @@ async def create_recording(
             content_type,
             start,
             end,
+            recording_id,
         )
     except AccessDeniedError as exc:
         raise _map_access_error(exc) from exc
