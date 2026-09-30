@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -111,3 +111,25 @@ class AccessGrantModel(Base):
     granted_by: Mapped[uuid.UUID]
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AuditLedgerStateModel(Base):
+    """Anker der HMAC-geschuetzten, verketteten Audit-Ereignisse (NF-06)."""
+
+    __tablename__ = "audit_ledger_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_hash: Mapped[str] = mapped_column(String(64), default="")
+
+
+class AuditEventModel(Base):
+    """Append-only Audit-Ereignis ohne klinischen Klartext (F-33/NF-06)."""
+
+    __tablename__ = "audit_events"
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    actor_id: Mapped[str] = mapped_column(String(255), index=True)
+    patient_ref: Mapped[str] = mapped_column(String, index=True)
+    action: Mapped[str] = mapped_column(String(100))
+    purpose: Mapped[str] = mapped_column(String(100))
+    previous_hash: Mapped[str] = mapped_column(String(64), default="")
+    entry_hash: Mapped[str] = mapped_column(String(64), unique=True)

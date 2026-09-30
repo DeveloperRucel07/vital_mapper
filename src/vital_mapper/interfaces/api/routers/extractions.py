@@ -50,7 +50,7 @@ async def update_extraction(
         ) from exc
 
     extraction = await UpdateClinicalExtractionUseCase(repository).execute(extraction_id, body.data)
-    await log_access(user.subject, patient_ref, "update_clinical_extraction")
+    await log_access(session, user.subject, patient_ref, "update_clinical_extraction")
     return {
         "id": str(extraction.id),
         "transcript_id": str(extraction.transcript_id),

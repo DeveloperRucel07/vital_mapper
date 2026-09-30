@@ -99,7 +99,7 @@ async def create_recording(
         )
     except AccessDeniedError as exc:
         raise _map_access_error(exc) from exc
-    await log_access(user.subject, patient.patient_ref, "upload_recording")
+    await log_access(session, user.subject, patient.patient_ref, "upload_recording")
     return {
         "id": str(recording.id),
         "patient_ref": recording.patient_ref,
@@ -133,7 +133,7 @@ async def transcribe_recording(
             status_code=status.HTTP_410_GONE,
             detail="Die Aufbewahrungsdauer der Audiodatei ist abgelaufen.",
         ) from exc
-    await log_access(user.subject, recording.patient_ref, "transcribe_recording")
+    await log_access(session, user.subject, recording.patient_ref, "transcribe_recording")
     return {
         "id": str(transcript.id),
         "recording_id": str(transcript.recording_id),
@@ -163,7 +163,7 @@ async def extract_transcript(
         RedisEventBus(settings.redis_url),
     ).execute(transcript_id, body.text)
     draft = await CreateCareReportDraftUseCase(repository).execute(extraction.id)
-    await log_access(user.subject, recording.patient_ref, "extract_clinical_data")
+    await log_access(session, user.subject, recording.patient_ref, "extract_clinical_data")
     return {
         "id": str(extraction.id),
         "transcript_id": str(extraction.transcript_id),

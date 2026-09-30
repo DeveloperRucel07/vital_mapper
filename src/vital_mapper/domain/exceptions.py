@@ -8,6 +8,10 @@ class UngroundedExtractionError(DomainError):
     infrastructure/ollama/ollama_adapter.py."""
 
 
+class AuditIntegrityError(DomainError):
+    """Die kryptographisch geschuetzte Audit-Kette wurde manipuliert (NF-06)."""
+
+
 class AccessDeniedError(DomainError):
     """Zugriff auf Patientendaten ohne gueltige Rolle oder Vertretungszugriff
     (F-31/F-32)."""

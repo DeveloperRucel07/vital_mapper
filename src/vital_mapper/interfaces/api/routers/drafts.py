@@ -41,7 +41,11 @@ logger = structlog.get_logger("drafts")
 
 
 async def _assert_patient_access(
-    repository: PostgresRepository, draft_id: uuid.UUID, user: CurrentUser, action: str
+    repository: PostgresRepository,
+    session: AsyncSession,
+    draft_id: uuid.UUID,
+    user: CurrentUser,
+    action: str,
 ) -> str:
     """Prueft den Patientenzugriff und protokolliert ihn (F-31/F-33)."""
     patient_ref = await repository.get_patient_ref_for_draft(draft_id)
@@ -58,7 +62,7 @@ async def _assert_patient_access(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Kein Zugriff auf die Patientendokumentation.",
         ) from exc
-    await log_access(user.subject, patient_ref, action)
+    await log_access(session, user.subject, patient_ref, action)
     return patient_ref
 
 
@@ -70,7 +74,7 @@ async def approve_draft(
     user: CurrentUser = Depends(require_role(UserRole.PFLEGEFACHKRAFT, UserRole.SCHICHTLEITUNG)),
 ) -> dict[str, Any]:
     repository = PostgresRepository(session)
-    patient_ref = await _assert_patient_access(repository, draft_id, user, "approve_draft")
+    patient_ref = await _assert_patient_access(repository, session, draft_id, user, "approve_draft")
     use_case = ApproveDocumentationUseCase(repository)
     approval = await use_case.execute(draft_id, user.id, body.model_versions)
     submission_status = "submitted"
@@ -119,7 +123,7 @@ async def get_draft(
     user: CurrentUser = Depends(require_role(UserRole.PFLEGEFACHKRAFT, UserRole.SCHICHTLEITUNG)),
 ) -> dict[str, str]:
     repository = PostgresRepository(session)
-    await _assert_patient_access(repository, draft_id, user, "read_draft")
+    await _assert_patient_access(repository, session, draft_id, user, "read_draft")
     draft = await repository.get_draft(draft_id)
     return {
         "id": str(draft.id),
@@ -139,9 +143,9 @@ async def update_draft(
     user: CurrentUser = Depends(require_role(UserRole.PFLEGEFACHKRAFT, UserRole.SCHICHTLEITUNG)),
 ) -> dict[str, str]:
     repository = PostgresRepository(session)
-    patient_ref = await _assert_patient_access(repository, draft_id, user, "update_draft")
+    patient_ref = await _assert_patient_access(repository, session, draft_id, user, "update_draft")
     draft = await UpdateCareReportDraftUseCase(repository).execute(draft_id, body.report_text)
-    await log_access(user.subject, patient_ref, "update_draft")
+    await log_access(session, user.subject, patient_ref, "update_draft")
     return {
         "id": str(draft.id),
         "extraction_id": str(draft.extraction_id),
@@ -160,7 +164,7 @@ async def add_correction(
     user: CurrentUser = Depends(require_role(UserRole.PFLEGEFACHKRAFT)),
 ) -> dict[str, str]:
     repository = PostgresRepository(session)
-    await _assert_patient_access(repository, draft_id, user, "record_correction")
+    await _assert_patient_access(repository, session, draft_id, user, "record_correction")
     use_case = RecordCorrectionUseCase(repository)
     correction = await use_case.execute(
         draft_id, body.field_path, body.prediction, body.correction, user.id

@@ -43,7 +43,7 @@ async def list_transcript_workspace(
         except AccessDeniedError:
             # Kein Hinweis darauf, dass ein Patientenkontext existiert.
             continue
-        await log_access(user.subject, item.patient_ref, "list_transcript_workspace")
+        await log_access(session, user.subject, item.patient_ref, "list_transcript_workspace")
         extraction = item.extraction
         draft = item.draft
         visible_items.append(

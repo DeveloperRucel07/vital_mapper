@@ -46,6 +46,7 @@ Stand: 2026-09-30
 | Container-Isolation | Backend, Frontend und Whisper laufen als unprivilegierte Benutzer; der Whisper-Port wird nicht mehr am Host veroeffentlicht. | F-26, R-05 |
 | Authentifizierung | OIDC-BFF mit PKCE, Nonce, HttpOnly-Sitzungscookie und serverseitig verschluesselter Redis-Sitzung ist vorhanden. | F-30 |
 | Autorisierung | Rollenpruefungen und patientenbezogene Zugriffspruefungen sind fuer die zentralen Dokumentationsrouten vorhanden. | F-30, F-31 |
+| Audit-Ledger | Patientenzugriffe werden persistent in einer HMAC-verketteten Kette gespeichert; die Integritaet wird vor Annahme von API-Verkehr geprueft. | F-33, NF-06 |
 | Grounding | Zahlen, Freitext, Boolean- und Enum-Fakten aus der KI-Extraktion werden gegen das Transkript geprueft. Unbelegte Werte werden vor der Anzeige geleert und als unsicher markiert. | F-08, F-15 |
 | Menschliche Freigabe | Externe klinische Speicherung erfolgt erst nach expliziter Freigabe. | F-18, F-19 |
 | Modellnachweis | Whisper- und Ollama-Versionen werden an mehreren Stellen gespeichert. | F-25 |
@@ -56,7 +57,6 @@ Stand: 2026-09-30
 | Prioritaet | Befund | Betroffene Anforderungen |
 |---|---|---|
 | Hoch | TLS-Zertifikate, interne PKI und die tatsaechliche TLS-Terminierung werden ausserhalb dieses Repositories bereitgestellt und muessen im Zielbetrieb nachgewiesen werden. | F-26, R-05 |
-| Hoch | Auditdaten werden nur strukturiert geloggt; eine manipulationssichere, persistente Audit-Senke fehlt. | F-33, NF-06 |
 | Hoch | Aenderungen an Transkript, Extraktion und Bericht erzeugen nicht durchgaengig automatisch einen Vorher-/Nachher-Nachweis. | F-21 |
 | Hoch | Die Outbox besitzt keinen nachgewiesenen Worker fuer Retry, Idempotenz und Statusfortschritt. | F-20, F-23, F-33 |
 | Hoch | Betroffenenrechte fuer Auskunft, Berichtigung und Loeschung sind nicht als vollstaendige Use Cases umgesetzt. | F-29 |
@@ -360,6 +360,56 @@ und darf lokal nie als Klartext persistiert werden.
 - Eine serverseitige Warteschlange fuer eine erneut fehlgeschlagene
   Transkription nach bereits erfolgreichem Upload ist weiterhin ein separater
   Betriebsbaustein (F-23, NF-07).
+
+### 2026-09-30 - Persistentes, manipulationserkennbares Audit-Ledger
+
+**Anforderungen:** F-33, NF-06
+
+**Ziel:** Patientenzugriffe muessen dauerhaft nachvollziehbar sein; eine
+nachtraegliche Aenderung oder Entfernung von Auditdaten muss erkannt werden.
+
+**Umsetzung:**
+
+- Audit-Ereignisse werden in den neuen Tabellen `audit_events` und
+  `audit_ledger_state` persistiert. Sie enthalten nur Akteur, pseudonyme
+  Patientenreferenz, Aktion, Zweck und Zeitpunkt; klinische Inhalte werden
+  nicht in das Audit-Ledger kopiert.
+- Jeder Eintrag enthaelt den HMAC-SHA-256 des kanonischen Ereignisses und des
+  vorherigen Eintrags. Der Endanker wird atomar mit dem Ereignis aktualisiert.
+  Aendern, Einfuegen, Entfernen oder Umordnen ohne den separaten HMAC-
+  Schluessel ist damit erkennbar.
+- Der HMAC-Schluessel kommt aus `Settings` (`AUDIT_HMAC_KEY`). Produktion
+  verweigert Start ohne getrennten Audit-Schluessel oder bei Wiederverwendung
+  des JWT-Schluessels.
+- Beim Anwendungsstart wird die vollstaendige Kette validiert. Bei einem
+  Integritaetsfehler startet der API-Dienst nicht.
+- Die bisherigen strukturierten Audit-Logs bleiben zusaetzlich fuer die
+  Betriebsbeobachtung erhalten; die relationale Ledger-Persistenz ist jetzt
+  die primaere Nachweisquelle im Projekt.
+
+**Geaenderte Komponenten:**
+
+- `src/vital_mapper/infrastructure/security/audit.py`
+- `src/vital_mapper/infrastructure/persistence/models.py`
+- `src/vital_mapper/interfaces/api/main.py` und die patientenbezogenen Router
+- `src/vital_mapper/config.py`, `.env.example`
+- `tests/unit/test_audit_ledger.py`
+
+**Verifikation:**
+
+- Eine intakte Audit-Kette wird akzeptiert; manipulierte Aktion oder ein
+  veraenderter Endanker werden erkannt.
+- Python-Gesamtsuite: 52 erfolgreich.
+- Ruff, Mypy und Bandit: ohne Befund.
+
+**Restrisiko und offene Punkte:**
+
+- Die HMAC-Kette ist manipulationserkennbar, aber keine externe WORM-
+  Archivierung. Der Produktionsbetrieb braucht weiterhin eine getrennte,
+  restriktiv berechtigte Datenbankrolle, Schluesselverwaltung sowie einen
+  regelmaessigen Export in eine revisionssichere zentrale Audit-Senke.
+- Vorher-/Nachher-Nachweise fuer alle klinischen Aenderungen (F-21) sind ein
+  eigener, noch offener Arbeitsschritt.
 
 ## Vorlage fuer weitere Eintraege
 

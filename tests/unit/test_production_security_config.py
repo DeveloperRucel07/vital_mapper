@@ -46,12 +46,37 @@ def test_production_accepts_secure_transport_configuration() -> None:
             "bff_cookie_secure": True,
             "legacy_auth_enabled": False,
             "clinical_data_encryption_key": ("MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE="),
+            "audit_hmac_key": "synthetic-audit-hmac-key-separated-from-jwt",
         }
     )
 
     settings = Settings(_env_file=None, **values)  # type: ignore[arg-type]
 
     assert settings.app_env == "production"
+
+
+def test_production_rejects_audit_key_reuse() -> None:
+    values = _base_settings()
+    values.update(
+        {
+            "app_env": "production",
+            "database_url": "postgresql+asyncpg://user:password@db/vitalmapper?ssl=require",
+            "redis_url": "rediss://redis:6379/0",
+            "bff_redis_url": "rediss://redis:6379/1",
+            "ollama_base_url": "https://ollama.internal",
+            "whisper_base_url": "https://whisper.internal",
+            "fhir_base_url": "https://fhir.internal/fhir",
+            "app_origin": "https://vital-mapper.example.invalid",
+            "interop_gateway_url": "https://interop.internal",
+            "bff_cookie_secure": True,
+            "legacy_auth_enabled": False,
+            "clinical_data_encryption_key": "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE=",
+            "audit_hmac_key": "synthetic-jwt-secret",
+        }
+    )
+
+    with pytest.raises(ValidationError, match="AUDIT_HMAC_KEY_KEY_SEPARATION"):
+        Settings(_env_file=None, **values)  # type: ignore[arg-type]
 
 
 def test_invalid_fernet_key_is_rejected_without_echoing_secret() -> None:

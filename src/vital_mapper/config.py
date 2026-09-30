@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     bootstrap_admin_password: str | None = None
     audio_encryption_key: str
     clinical_data_encryption_key: str = ""
+    audit_hmac_key: str = ""
     audio_storage_path: str = "/var/lib/vital-mapper/audio"
     max_audio_bytes: int = 25_000_000
 
@@ -108,6 +109,10 @@ class Settings(BaseSettings):
             insecure.append("CLINICAL_DATA_ENCRYPTION_KEY")
         elif self.clinical_data_encryption_key == self.audio_encryption_key:
             insecure.append("CLINICAL_DATA_ENCRYPTION_KEY_KEY_SEPARATION")
+        if not self.audit_hmac_key:
+            insecure.append("AUDIT_HMAC_KEY")
+        elif self.audit_hmac_key == self.jwt_secret_key:
+            insecure.append("AUDIT_HMAC_KEY_KEY_SEPARATION")
 
         if insecure:
             names = ", ".join(sorted(set(insecure)))

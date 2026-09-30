@@ -29,14 +29,14 @@ async def test_patient_access_is_allowed_with_active_grant(
 ) -> None:
     logged: list[tuple[str, str, str]] = []
 
-    async def fake_log_access(user_id: str, patient_ref: str, action: str) -> None:
+    async def fake_log_access(session, user_id: str, patient_ref: str, action: str) -> None:
         logged.append((user_id, patient_ref, action))
 
     monkeypatch.setattr(drafts, "log_access", fake_log_access)
     user = CurrentUser(uuid.uuid4(), UserRole.PFLEGEFACHKRAFT)
     repository = cast(PostgresRepository, FakeAccessRepository(has_access=True))
 
-    patient_ref = await drafts._assert_patient_access(repository, uuid.uuid4(), user, "read")
+    patient_ref = await drafts._assert_patient_access(repository, None, uuid.uuid4(), user, "read")
 
     assert patient_ref == "synthetic-patient-001"
     assert logged == [(str(user.id), patient_ref, "read")]
@@ -45,7 +45,7 @@ async def test_patient_access_is_allowed_with_active_grant(
 async def test_patient_access_is_rejected_without_active_grant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_log_access(user_id: str, patient_ref: str, action: str) -> None:
+    async def fake_log_access(session, user_id: str, patient_ref: str, action: str) -> None:
         return None
 
     monkeypatch.setattr(drafts, "log_access", fake_log_access)
@@ -53,6 +53,6 @@ async def test_patient_access_is_rejected_without_active_grant(
     repository = cast(PostgresRepository, FakeAccessRepository(has_access=False))
 
     with pytest.raises(HTTPException) as error:
-        await drafts._assert_patient_access(repository, uuid.uuid4(), user, "read")
+        await drafts._assert_patient_access(repository, None, uuid.uuid4(), user, "read")
 
     assert error.value.status_code == 403
